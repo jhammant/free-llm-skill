@@ -512,6 +512,7 @@ export function createProxyHandler(options) {
         const rateLimit = await scheduler.recordRateLimit(
           selected.provider.id,
           upstreamHeader(upstream, 'retry-after'),
+          { errorBody: safeText },
         );
         await log({
           provider: selected.provider.id,
@@ -520,6 +521,8 @@ export function createProxyHandler(options) {
           latencyMs,
           status,
           outcome: 'rate_limited',
+          error: safeText,
+          retryAfter: rateLimit.retryAfter,
         });
         lastFailure = {
           status,
@@ -543,6 +546,7 @@ export function createProxyHandler(options) {
           latencyMs,
           status,
           outcome: 'upstream_error',
+          error: safeText,
         });
         lastFailure = {
           status,
@@ -595,6 +599,7 @@ export function createProxyHandler(options) {
         latencyMs,
         status,
         outcome: outcomeForStatus(status),
+        ...(status >= 400 ? { error: safeText } : {}),
       });
       sendText(
         response,

@@ -15,3 +15,8 @@ export function logPath(env = process.env) {
   return env.FREE_LLM_LOG_FILE
     ?? join(homedir(), '.local', 'state', 'free-llm', 'requests.jsonl');
 }
+
+export function observedLimitsPath(env = process.env) {
+  return env.FREE_LLM_OBSERVED_LIMITS_FILE
+    ?? join(homedir(), '.local', 'state', 'free-llm', 'observed-limits.json');
+}

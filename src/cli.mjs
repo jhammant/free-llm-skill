@@ -8,12 +8,27 @@ import { createRedactor } from './redact.mjs';
 import { createScheduler } from './scheduler.mjs';
 import { createProxyServer, listen } from './proxy.mjs';
 import { listModels } from './models.mjs';
-import { logPath, statePath } from './paths.mjs';
+import {
+  configPath,
+  logPath,
+  observedLimitsPath,
+  statePath,
+} from './paths.mjs';
 import { readRequestLog, RequestLog } from './request-log.mjs';
+import { addProviders, probeProvider } from './onboarding.mjs';
+import { checkProviders, diagnoseProviders } from './health.mjs';
+import { providerDefinition } from './providers.mjs';
 
 const VERSION = '1.0.0';
 const VALUE_OPTIONS = new Set(['port', 'host', 'limit']);
-const BOOLEAN_OPTIONS = new Set(['json', 'help', 'version']);
+const BOOLEAN_OPTIONS = new Set([
+  'all',
+  'dry-run',
+  'json',
+  'help',
+  'no-open',
+  'version',
+]);
 
 const HELP = `free-llm ${VERSION}
 
@@ -23,6 +38,10 @@ Usage:
   free-llm models [--json]
   free-llm log [--limit n] [--json]
   free-llm check [--json]
+  free-llm add <provider> [--no-open] [--json]
+  free-llm add --all [--no-open] [--json]
+  free-llm probe <provider> [--dry-run] [--json]
+  free-llm doctor [provider] [--json]
   free-llm --version
 
 Configuration:
@@ -95,6 +114,14 @@ function formatRemaining(bucket) {
   return `${bucket.remaining.toFixed(1)}/${bucket.limit}`;
 }
 
+function formatLimit(value) {
+  return value == null ? '-' : String(value);
+}
+
+function observedLimit(provider, name) {
+  return formatLimit(provider.observedLimits?.[name]?.limit);
+}
+
 function isLoopback(host) {
   const normalized = host.toLowerCase().replace(/^\[|\]$/g, '');
   return normalized === 'localhost'
@@ -120,6 +147,7 @@ async function runtime(options) {
   const scheduler = options.scheduler ?? await createScheduler(configured.config.providers, {
     env,
     statePath: options.statePath ?? statePath(env),
+    observedLimitsPath: options.observedLimitsPath ?? observedLimitsPath(env),
     clock: options.clock,
     rng: options.rng,
   });
@@ -127,9 +155,20 @@ async function runtime(options) {
 }
 
 export async function runCli(argv, options = {}) {
-  const stdout = options.stdout ?? process.stdout;
-  const stderr = options.stderr ?? process.stderr;
   const env = options.env ?? process.env;
+  const ambientRedactor = environmentRedactor(env);
+  const rawStdout = options.stdout ?? process.stdout;
+  const rawStderr = options.stderr ?? process.stderr;
+  const stdout = {
+    write(chunk) {
+      return rawStdout.write(ambientRedactor.string(chunk));
+    },
+  };
+  const stderr = {
+    write(chunk) {
+      return rawStderr.write(ambientRedactor.string(chunk));
+    },
+  };
   const parsed = parseArgs(argv);
   const command = parsed.positionals[0];
 
@@ -141,20 +180,160 @@ export async function runCli(argv, options = {}) {
     stdout.write(HELP);
     return { exitCode: 0 };
   }
-  if (!['serve', 'status', 'models', 'log', 'check'].includes(command)) {
+  if (![
+    'add',
+    'check',
+    'doctor',
+    'log',
+    'models',
+    'probe',
+    'serve',
+    'status',
+  ].includes(command)) {
     throw new Error(`Unknown command "${command}"`);
   }
+
+  if (command === 'add') {
+    const providerId = parsed.positionals[1];
+    if (parsed.positionals.length > 2) {
+      throw new Error(
+        'add accepts a provider name only; API keys must come from hidden input or stdin',
+      );
+    }
+    if (parsed.options.all && providerId) {
+      throw new Error('add accepts either <provider> or --all, not both');
+    }
+    if (!parsed.options.all && !providerId) {
+      throw new Error('add requires <provider> or --all');
+    }
+    const result = await addProviders({
+      ...options,
+      all: parsed.options.all === true,
+      providerId,
+      noOpen: parsed.options['no-open'] === true,
+      json: parsed.options.json === true,
+      configPath: options.configPath ?? configPath(env),
+      stdout,
+      stderr,
+      env,
+    });
+    if (parsed.options.json) writeJson(stdout, result);
+    return result;
+  }
+
+  if (command === 'probe') {
+    if (parsed.positionals.length !== 2) {
+      throw new Error('probe requires exactly one provider name');
+    }
+    const configured = await configuration({ ...options, env });
+    const current = configured.config.providers.find(
+      (provider) => provider.id === parsed.positionals[1],
+    );
+    if (!current) throw new Error(`Unknown configured provider "${parsed.positionals[1]}"`);
+    const definition = providerDefinition(current.provider) ?? providerDefinition(current.id);
+    const provider = definition == null ? current : {
+      ...definition,
+      ...current,
+      cheapestModel: definition.cheapestModel,
+    };
+    const result = await probeProvider(provider, {
+      ...options,
+      dryRun: parsed.options['dry-run'] === true,
+      observedLimitsPath: options.observedLimitsPath ?? observedLimitsPath(env),
+      env,
+    });
+    const safeResult = configured.redactor.value(result);
+    if (parsed.options.json) {
+      writeJson(stdout, safeResult);
+    } else if (safeResult.dryRun) {
+      stdout.write(
+        `Probe plan: ${safeResult.provider} · ${safeResult.model} · up to ${safeResult.maximumRequests} requests · max_tokens 1 · worst case ${safeResult.worstCaseTokens} tokens · daily limit not probed\n`,
+      );
+    } else {
+      const symbol = safeResult.state === 'broken'
+        ? '✗'
+        : safeResult.state === 'throttled' ? '⚠' : '✓';
+      stdout.write(
+        `${symbol} ${safeResult.provider}: ${safeResult.reason}; ${safeResult.requests} requests, observed RPM ${safeResult.observedRpm ?? 'unknown'}\n`,
+      );
+    }
+    return {
+      exitCode: safeResult.state === 'broken' ? 1 : 0,
+      report: safeResult,
+    };
+  }
+
+  if (command === 'doctor') {
+    if (parsed.positionals.length > 2) {
+      throw new Error('doctor accepts at most one provider name');
+    }
+    const configured = await configuration({ ...options, env });
+    const requested = parsed.positionals[1];
+    const providers = requested == null
+      ? configured.config.providers
+      : configured.config.providers.filter((provider) => provider.id === requested);
+    if (providers.length === 0) {
+      throw new Error(`Unknown configured provider "${requested}"`);
+    }
+    const current = await runtime({
+      ...options,
+      env,
+      config: configured.config,
+      redactor: configured.redactor,
+    });
+    const entries = await readRequestLog({
+      env,
+      path: options.logPath ?? logPath(env),
+      limit: Math.max(100, providers.length * 100),
+    });
+    const report = configured.redactor.value(await diagnoseProviders(
+      providers,
+      entries,
+      {
+        ...options,
+        env,
+        redactor: configured.redactor,
+        schedulerStatus: current.scheduler.status(),
+        observedLimitsPath: options.observedLimitsPath ?? observedLimitsPath(env),
+      },
+    ));
+    if (parsed.options.json) {
+      writeJson(stdout, report);
+    } else {
+      for (const provider of report.providers) {
+        const rate = provider.successRate == null
+          ? 'no recent calls'
+          : `${(provider.successRate * 100).toFixed(1)}% success over ${provider.calls} calls`;
+        stdout.write(`${provider.id}: ${rate}\n`);
+        if (provider.lastError) {
+          stdout.write(
+            `  last error: ${provider.lastError.status ?? '-'} ${provider.lastError.outcome ?? '-'} on ${provider.lastError.model ?? '-'} (${provider.lastError.latencyMs ?? 0}ms)${provider.lastError.body ? ` — ${provider.lastError.body}` : ''}\n`,
+          );
+        }
+        for (const drift of provider.limitDrift) {
+          stdout.write(
+            `  limit drift: ${drift.name} configured ${drift.configured ?? '-'}, observed ${drift.observed}\n`,
+          );
+        }
+        if (provider.degraded) stdout.write('  warning: success rate is below 90%\n');
+        stdout.write(`  next action: ${provider.nextAction}\n`);
+      }
+    }
+    return { exitCode: 0, report };
+  }
+
   ensureNoPositionals(parsed.positionals, command);
 
   if (command === 'log') {
     const limit = parsed.options.limit == null
       ? 20
       : numericOption(parsed.options.limit, 'limit', { minimum: 1, maximum: 10_000 });
-    const entries = await readRequestLog({
+    const logConfiguration = await configuration({ ...options, env });
+    const entries = logConfiguration.redactor.value(await readRequestLog({
       env,
       path: options.logPath ?? logPath(env),
       limit,
-    });
+    }));
     if (parsed.options.json) {
       writeJson(stdout, entries);
     } else {
@@ -171,30 +350,42 @@ export async function runCli(argv, options = {}) {
 
   const configured = await configuration({ ...options, env });
   if (command === 'check') {
-    const report = {
+    const current = await runtime({
+      ...options,
+      env,
+      config: configured.config,
+      redactor: configured.redactor,
+    });
+    const checked = await checkProviders(configured.config.providers, {
+      ...options,
+      redactor: configured.redactor,
+      schedulerStatus: current.scheduler.status(),
+    });
+    const report = configured.redactor.value({
       source: configured.config.source,
-      valid: true,
-      providers: configured.config.providers.map((provider) => ({
-        id: provider.id,
-        provider: provider.provider,
-        usable: provider.configured,
-        apiKeyEnv: provider.apiKeyEnv,
-        reason: provider.configured
-          ? 'ready'
-          : `${provider.apiKeyEnv} is unset`,
-      })),
-    };
+      providers: checked.providers,
+    });
     if (parsed.options.json) {
       writeJson(stdout, report);
     } else {
-      stdout.write(`Config: ${report.source}\n`);
-      printRows(stdout, report.providers, [
-        { label: 'ID', value: (provider) => provider.id },
-        { label: 'USABLE', value: (provider) => (provider.usable ? 'yes' : 'no') },
-        { label: 'REASON', value: (provider) => provider.reason },
-      ]);
+      for (const provider of report.providers) {
+        const symbol = {
+          working: '✓',
+          broken: '✗',
+          throttled: '⚠',
+          unconfigured: '○',
+        }[provider.state];
+        const models = provider.state === 'working' ? `${provider.models} models` : '';
+        const latency = provider.latencyMs == null ? '' : `${provider.latencyMs}ms`;
+        const budget = provider.budget == null
+          ? ''
+          : `budget ${provider.budget.remaining.toFixed(0)}/${provider.budget.limit} today`;
+        stdout.write(
+          `${symbol} ${provider.id}\t${[models, latency, budget, provider.reason].filter(Boolean).join('\t')}\n`,
+        );
+      }
     }
-    return { exitCode: 0, report };
+    return { exitCode: checked.exitCode, report };
   }
 
   if (command === 'models') {
@@ -227,7 +418,11 @@ export async function runCli(argv, options = {}) {
         { label: 'CONFIGURED', value: (provider) => (provider.configured ? 'yes' : 'no') },
         { label: 'ELIGIBLE', value: (provider) => (provider.eligible ? 'yes' : 'no') },
         { label: 'RPM', value: (provider) => formatRemaining(provider.buckets.rpm) },
+        { label: 'RPM CONFIG', value: (provider) => formatLimit(provider.configuredLimits.rpm) },
+        { label: 'RPM OBSERVED', value: (provider) => observedLimit(provider, 'rpm') },
         { label: 'RPD', value: (provider) => formatRemaining(provider.buckets.rpd) },
+        { label: 'RPD CONFIG', value: (provider) => formatLimit(provider.configuredLimits.rpd) },
+        { label: 'RPD OBSERVED', value: (provider) => observedLimit(provider, 'rpd') },
         { label: 'TPM', value: (provider) => formatRemaining(provider.buckets.tpm) },
         { label: 'BREAKER', value: (provider) => provider.breaker },
         { label: 'RETRY', value: (provider) => `${provider.retryAfter}s` },
@@ -283,7 +478,7 @@ export async function runCli(argv, options = {}) {
 function environmentRedactor(env) {
   const likelySecrets = Object.entries(env)
     .filter(([name, value]) => (
-      /(?:API_?KEY|TOKEN|SECRET|PASSWORD)$/i.test(name)
+      /(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD)$/i.test(name)
       && typeof value === 'string'
       && value.length > 0
     ))
@@ -301,7 +496,10 @@ export async function main(argv = process.argv.slice(2)) {
     process.exitCode = 1;
     return;
   }
-  if (!result.server) return;
+  if (!result.server) {
+    process.exitCode = result.exitCode ?? 0;
+    return;
+  }
   const close = () => result.server.close();
   process.once('SIGINT', close);
   process.once('SIGTERM', close);

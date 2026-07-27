@@ -1,6 +1,14 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { statePath as defaultStatePath } from './paths.mjs';
+import {
+  observedLimitsPath as defaultObservedLimitsPath,
+  statePath as defaultStatePath,
+} from './paths.mjs';
+import {
+  applyObservedLimits,
+  loadObservedLimits,
+  writeObservedLimit,
+} from './observed-limits.mjs';
 
 export const LIMIT_WINDOWS_MS = Object.freeze({
   rpm: 60_000,
@@ -161,11 +169,16 @@ export class Scheduler {
     this.path = options.statePath === null
       ? null
       : (options.statePath ?? defaultStatePath(options.env));
+    this.observedLimitsPath = options.observedLimitsPath === null
+      ? null
+      : (options.observedLimitsPath ?? defaultObservedLimitsPath(options.env));
+    this.observedDocument = options.observedDocument ?? { version: 1, providers: {} };
     this.providers = new Map();
     this.states = new Map();
     this.selectionSequence = 0;
     this.writeCounter = 0;
     this.persistQueue = Promise.resolve();
+    this.observedPersistQueue = Promise.resolve();
     const now = this.clock();
     for (const provider of providers) {
       if (!provider || typeof provider.id !== 'string' || provider.id.length === 0) {
@@ -180,7 +193,22 @@ export class Scheduler {
   }
 
   static async create(providers, options = {}) {
-    const scheduler = new Scheduler(providers, options);
+    const observedDocument = options.observedLimitsPath === null
+      ? { version: 1, providers: {} }
+      : options.observedLimits != null
+        ? {
+          version: 1,
+          providers: options.observedLimits.providers ?? options.observedLimits,
+        }
+        : await loadObservedLimits({
+          path: options.observedLimitsPath,
+          env: options.env,
+        });
+    const effectiveProviders = applyObservedLimits(providers, observedDocument);
+    const scheduler = new Scheduler(effectiveProviders, {
+      ...options,
+      observedDocument,
+    });
     await scheduler.load();
     return scheduler;
   }
@@ -417,7 +445,39 @@ export class Scheduler {
     };
   }
 
-  async recordRateLimit(providerId, retryAfter = null) {
+  async recordObservedLimit(providerId, name, limit, options = {}) {
+    if (this.observedLimitsPath == null) return null;
+    const update = async () => {
+      const provider = this.providers.get(providerId);
+      const state = this.states.get(providerId);
+      if (!provider || !state) throw new Error(`Unknown provider "${providerId}"`);
+      const entry = await writeObservedLimit(providerId, name, limit, {
+        path: this.observedLimitsPath,
+        clock: this.clock,
+        current: this.observedDocument,
+        source: options.source ?? 'passive',
+        details: options.details,
+      });
+      this.observedDocument = await loadObservedLimits({ path: this.observedLimitsPath });
+      provider.observedLimits ??= {};
+      provider.observedLimits[name] = entry;
+      provider.configuredLimits ??= { ...provider.limits };
+      provider.limits[name] = limit;
+      const bucket = state.buckets[name];
+      if (bucket) {
+        const consumed = Math.max(0, bucket.capacity - bucket.tokens);
+        bucket.capacity = limit;
+        bucket.tokens = Math.max(0, Math.min(limit, limit - consumed));
+      } else {
+        state.buckets[name] = makeBucket(limit, this.clock());
+      }
+      return entry;
+    };
+    this.observedPersistQueue = this.observedPersistQueue.catch(() => {}).then(update);
+    return this.observedPersistQueue;
+  }
+
+  async recordRateLimit(providerId, retryAfter = null, details = {}) {
     const state = this.states.get(providerId);
     if (!state) throw new Error(`Unknown provider "${providerId}"`);
     const now = this.clock();
@@ -426,6 +486,19 @@ export class Scheduler {
     const delayMs = headerDelay ?? (1000 * (2 ** Math.min(state.rateLimitFailures - 1, 20)));
     state.cooldownUntil = now + delayMs;
     state.halfOpenInFlight = false;
+    const dailySignal = /(?:daily|per[ -]?day|\brpd\b|daily quota)/i.test(
+      String(details.errorBody ?? ''),
+    ) || (headerDelay != null && headerDelay >= 3_600_000);
+    if (dailySignal && state.buckets.rpd) {
+      const used = Math.max(
+        1,
+        Math.ceil(state.buckets.rpd.capacity - state.buckets.rpd.tokens),
+      );
+      await this.recordObservedLimit(providerId, 'rpd', used, {
+        source: 'passive-429',
+        details: { retryAfter },
+      });
+    }
     await this.persist();
     return { delayMs, retryAfter: Math.max(0, Math.ceil(delayMs / 1000)) };
   }
@@ -501,6 +574,16 @@ export class Scheduler {
         id: provider.id,
         provider: provider.provider ?? provider.id,
         configured: provider.configured !== false,
+        configuredLimits: {
+          ...(provider.configuredLimits ?? provider.limits),
+        },
+        observedLimits: Object.fromEntries(
+          Object.entries(provider.observedLimits ?? {}).map(([name, entry]) => [
+            name,
+            { ...entry },
+          ]),
+        ),
+        effectiveLimits: { ...provider.limits },
         eligible: evaluation.eligible,
         retryAfter: evaluation.eligible
           ? 0

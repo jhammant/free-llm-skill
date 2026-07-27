@@ -1,4 +1,12 @@
-import { readFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  readFile,
+  rename,
+  writeFile,
+} from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { dirname } from 'node:path';
 import { configPath as defaultConfigPath } from './paths.mjs';
 
 export const DEFAULT_CONFIG = Object.freeze({
@@ -214,6 +222,62 @@ export async function loadConfig(options = {}) {
     }
   }
   return validateConfig(raw, { env, source });
+}
+
+function serializableProvider(provider) {
+  return {
+    id: provider.id,
+    provider: provider.provider ?? provider.id,
+    baseUrl: provider.baseUrl,
+    apiKeyEnv: provider.apiKeyEnv,
+    limits: { ...provider.limits },
+    models: [...(provider.models ?? [])],
+    supportsEmbeddings: provider.supportsEmbeddings !== false,
+  };
+}
+
+export function configDocument(config) {
+  return {
+    providers: config.providers.map(serializableProvider),
+    aliases: structuredClone(config.aliases ?? {}),
+  };
+}
+
+export async function readConfigDocument(options = {}) {
+  const path = options.path ?? defaultConfigPath(options.env);
+  try {
+    const raw = JSON.parse(await readFile(path, 'utf8'));
+    validateConfig(raw, {
+      env: options.env ?? process.env,
+      source: path,
+    });
+    return raw;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { providers: [], aliases: {} };
+    if (error instanceof SyntaxError) {
+      throw new Error(`Could not parse provider config ${path}: ${error.message}`, {
+        cause: error,
+      });
+    }
+    throw error;
+  }
+}
+
+export async function writeConfig(config, options = {}) {
+  const path = options.path ?? defaultConfigPath(options.env);
+  const document = configDocument(config);
+  validateConfig(document, {
+    env: options.env ?? process.env,
+    source: path,
+  });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(document, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  await rename(temporary, path);
+  await chmod(path, 0o600);
+  return path;
 }
 
 export function publicConfig(config) {

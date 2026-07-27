@@ -31,6 +31,10 @@ free-llm status [--json]
 free-llm models [--json]
 free-llm log [--limit n] [--json]
 free-llm check [--json]
+free-llm add <provider> [--no-open] [--json]
+free-llm add --all [--no-open] [--json]
+free-llm probe <provider> [--dry-run] [--json]
+free-llm doctor [provider] [--json]
 ```
 
 An explicit non-loopback `--host` prints a warning. This process holds provider
@@ -134,6 +138,42 @@ limits displayed for your account. Check and update them before a long run:
 Mistral publishes account-specific limits in its console, so its built-in entry
 is intentionally very conservative. Copy the exact limits for your organization
 into the registry.
+
+## Guided onboarding and health
+
+`free-llm add <provider>` opens that provider's API-key page, then waits for the
+human to create and paste a key. It does not automate sign-up, account creation,
+CAPTCHAs, or key generation. Use `--no-open` on a headless machine. Key input is
+hidden on a terminal or read from stdin; keys are never accepted as command-line
+arguments.
+
+After one cheap validation completion, `add` stores only the environment
+variable name in the `0600` registry and prints an `export` template. Put the
+key in the named environment variable yourself. `add --all` saves each
+successfully validated provider atomically, so an interruption can be resumed
+without losing earlier work.
+
+`free-llm probe <provider>` carefully measures RPM with one-token completions.
+It ramps gradually, stops on the first 429, honors `Retry-After`, and has a hard
+ceiling of one request above the configured RPM. `--dry-run` sends no requests
+and shows the maximum request and token cost. Probe never tries to exhaust a
+daily allowance. Daily caps are inferred only from 429s encountered during
+normal proxy use.
+
+Observed limits are timestamped in
+`~/.local/state/free-llm/observed-limits.json`. They override published limits
+for scheduling; `free-llm status` shows configured, observed, and effective
+values together so drift remains visible.
+
+`free-llm check` makes one short, parallel request per configured provider and
+reports four distinct states: working, broken, throttled, and unconfigured. A
+429 is normal throttling and does not make the command fail. The exit status is
+non-zero only if a configured provider is genuinely broken.
+
+`free-llm doctor [provider]` correlates the most recent 100 request-log entries,
+shows the last redacted failure, highlights limit drift and success rates below
+90%, and gives a concrete next action. Its text and JSON output, like `check`,
+are safe to paste into an issue without exposing configured keys.
 
 ## Scheduling and failure behavior
 
