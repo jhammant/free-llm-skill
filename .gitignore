@@ -2,3 +2,9 @@ node_modules/
 coverage/
 *.log
 .DS_Store
+
+# defensive — this project handles API keys; never let one land here
+.env
+.env.*
+*.key
+providers.local.json
