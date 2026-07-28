@@ -1,0 +1,216 @@
+{
+  "$comment": [
+    "Default provider catalogue for free-llm. Every entry is DISABLED until you run",
+    "`free-llm add <id>`. limitConfidence records how much to trust each figure:",
+    "  verified   - confirmed against official docs on researchedOn",
+    "  unverified - published somewhere but not confirmed; probe to correct",
+    "  assumed    - NOT published anywhere, so a deliberately CONSERVATIVE floor is",
+    "               used. Never treat an unknown limit as unlimited; under-using a",
+    "               free tier is recoverable, exceeding it gets the key banned.",
+    "Run `free-llm probe <id>` to replace any of these with a measured value.",
+    "Cerebras is excluded: its widely cited 1M-tokens/day free tier was discontinued",
+    "and is now a $5 credit trial requiring a payment method."
+  ],
+  "schemaVersion": 1,
+  "researchedOn": "2026-07-27",
+  "providers": [
+    {
+      "id": "groq",
+      "label": "GroqCloud",
+      "baseUrl": "https://api.groq.com/openai/v1",
+      "apiKeyEnv": "GROQ_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 30,
+        "rpd": 1000,
+        "tpm": 6000
+      },
+      "limitConfidence": {
+        "rpm": "verified",
+        "rpd": "verified"
+      },
+      "trainsOnYourData": false,
+      "note": "org-level limits; daily reset ~midnight UTC (unverified); retry-after headers on 429"
+    },
+    {
+      "id": "nvidia",
+      "label": "NVIDIA NIM",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "apiKeyEnv": "NVIDIA_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 40,
+        "rpd": 100,
+        "tpm": null
+      },
+      "limitConfidence": {
+        "rpm": "unverified",
+        "rpd": "assumed"
+      },
+      "trainsOnYourData": false,
+      "note": "prototyping-only terms, no SLA, models rotate"
+    },
+    {
+      "id": "openrouter",
+      "label": "OpenRouter",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 20,
+        "rpd": 50,
+        "tpm": null
+      },
+      "limitConfidence": {
+        "rpm": "unverified",
+        "rpd": "unverified"
+      },
+      "trainsOnYourData": false,
+      "note": "lower routing priority on free variants; client must retry on 429"
+    },
+    {
+      "id": "cloudflare",
+      "label": "Cloudflare Workers AI",
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts",
+      "apiKeyEnv": "CLOUDFLARE_API_TOKEN",
+      "enabled": false,
+      "limits": {
+        "rpm": 300,
+        "rpd": 10000,
+        "tpm": null
+      },
+      "limitConfidence": {
+        "rpm": "verified",
+        "rpd": "verified"
+      },
+      "trainsOnYourData": false,
+      "note": "neuron budget shared across models/task types; hard daily stop"
+    },
+    {
+      "id": "github-models",
+      "label": "GitHub Models",
+      "baseUrl": "https://models.inference.ai.azure.com",
+      "apiKeyEnv": "GITHUB_TOKEN",
+      "enabled": false,
+      "limits": {
+        "rpm": 15,
+        "rpd": 150,
+        "tpm": 8
+      },
+      "limitConfidence": {
+        "rpm": "verified",
+        "rpd": "verified"
+      },
+      "trainsOnYourData": false,
+      "note": "prototyping-only ToS; public preview; low concurrency; 8K/4K per-request token caps"
+    },
+    {
+      "id": "gemini",
+      "label": "Google AI Studio",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "apiKeyEnv": "GOOGLE_AI_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 5,
+        "rpd": 100,
+        "tpm": null
+      },
+      "limitConfidence": {
+        "rpm": "assumed",
+        "rpd": "assumed"
+      },
+      "trainsOnYourData": true,
+      "note": "free-tier data used for training (except EEA/UK/CH); per-project quota"
+    },
+    {
+      "id": "zai",
+      "label": "Z.AI / Zhipu GLM",
+      "baseUrl": "https://api.z.ai/api/paas/v4",
+      "apiKeyEnv": "ZAI_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 5,
+        "rpd": 100,
+        "tpm": null
+      },
+      "limitConfidence": {
+        "rpm": "assumed",
+        "rpd": "assumed"
+      },
+      "trainsOnYourData": false,
+      "note": "long-context (>8K) Flash requests throttled to 1% concurrency under load; China vs international account split; China data residency"
+    },
+    {
+      "id": "modelscope",
+      "label": "ModelScope",
+      "baseUrl": "https://api-inference.modelscope.cn/v1",
+      "apiKeyEnv": "MODELSCOPE_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 5,
+        "rpd": 2000,
+        "tpm": null
+      },
+      "limitConfidence": {
+        "rpm": "assumed",
+        "rpd": "verified"
+      },
+      "trainsOnYourData": false,
+      "note": "best-effort community capacity; separate China/international accounts; daily reset time undocumented"
+    },
+    {
+      "id": "sambanova",
+      "label": "SambaNova Cloud",
+      "baseUrl": "https://api.sambanova.ai/v1",
+      "apiKeyEnv": "SAMBANOVA_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 20,
+        "rpd": 20,
+        "tpm": 200000
+      },
+      "limitConfidence": {
+        "rpm": "unverified",
+        "rpd": "unverified"
+      },
+      "trainsOnYourData": false,
+      "note": "reportedly unavailable in EU/UK/CH (unverified); very low 20 RPD cap"
+    },
+    {
+      "id": "ovh",
+      "label": "OVHcloud AI Endpoints",
+      "baseUrl": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+      "apiKeyEnv": "OVH_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 2,
+        "rpd": 100,
+        "tpm": null
+      },
+      "limitConfidence": {
+        "rpm": "verified",
+        "rpd": "assumed"
+      },
+      "trainsOnYourData": false,
+      "note": "EU-hosted; cold starts reported; authenticated tier needs a Public Cloud project"
+    },
+    {
+      "id": "mistral",
+      "label": "Mistral La Plateforme",
+      "baseUrl": "https://api.mistral.ai/v1",
+      "apiKeyEnv": "MISTRAL_API_KEY",
+      "enabled": false,
+      "limits": {
+        "rpm": 60,
+        "rpd": 100,
+        "tpm": 1
+      },
+      "limitConfidence": {
+        "rpm": "unverified",
+        "rpd": "assumed"
+      },
+      "trainsOnYourData": true,
+      "note": "free-tier data may train Mistral models (opt-out available); SMS verification; evaluation-only tier"
+    }
+  ]
+}
