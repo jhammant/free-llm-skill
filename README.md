@@ -1,17 +1,48 @@
 # free-llm
 
-`free-llm` pools the free tiers of hosted LLM providers behind one local,
-OpenAI-compatible endpoint. Its scheduler admits a request only when every
-configured provider limit has room, spreads work across the providers that can
-serve the requested model, and fails fast with HTTP 429 when the pool is empty.
+**Every free LLM tier is too small to be useful on its own.** Groq gives you
+1,000 requests a day on its bigger models. OpenRouter, 50. Gemini's numbers
+aren't published any more. Individually they're toys — so you end up either
+paying, or hand-rolling key rotation and getting your accounts banned for it.
 
-Realistic aggregate throughput is **roughly 60–150 requests/minute across five
-free tiers**. That is useful for overnight batch work, not real-time scale.
-Free-tier model quality and availability vary far more than paid tiers; keep the
-provider attribution attached to every result when judging a batch.
+`free-llm` pools them behind **one local OpenAI-compatible endpoint** and
+schedules requests so no provider's published limit is ever exceeded. One honest
+key per provider, no multi-accounting, no signup automation.
 
-A single OpenRouter key already aggregates many providers. Start there, then add
-direct providers only where their free tier is meaningfully better.
+```bash
+$ free-llm check
+✓ openrouter   339 models   151ms   budget 50/50 today   working
+○ groq         GROQ_API_KEY unset — skipped
+
+$ free-llm probe openrouter
+✓ no 429 at or below 21 requests; observed RPM 20
+```
+
+```mermaid
+flowchart LR
+  A[your code<br/>local-llm · route · anything] --> B[free-llm :8080<br/>OpenAI-compatible]
+  B --> C{token buckets<br/>rpm · rpd · tpm}
+  C -->|has budget| D[pick provider<br/>spread the load]
+  C -->|pool empty| E[429 + Retry-After<br/>never queue, never overshoot]
+  D --> F[OpenRouter]
+  D --> G[Groq]
+  D --> H[NVIDIA NIM]
+  D --> I[Cloudflare · GitHub · …]
+  F & G & H & I --> J[response +<br/>x-free-llm-provider]
+```
+
+It is deliberately **a proxy, not another CLI**. Point anything that speaks
+OpenAI at it — including [`local-llm-skill`](https://github.com/jhammant/local-llm-skill),
+which consumes it as one config line.
+
+**Published limits are unreliable, so measure them.** `free-llm probe` ramps to
+the first 429 and records the real ceiling, which then overrides config. It
+never probes a *daily* limit — discovering an RPD cap means burning a day's
+allowance to learn a number.
+
+Realistic aggregate is **roughly 60–150 requests/minute** across five free tiers:
+good for overnight batch, not real-time scale. Daily caps bind long before
+per-minute ones, so plan around the daily budget, not the RPM sum.
 
 ## Install
 
