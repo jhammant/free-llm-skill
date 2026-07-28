@@ -15,7 +15,7 @@ import {
   statePath,
 } from './paths.mjs';
 import { readRequestLog, RequestLog } from './request-log.mjs';
-import { addProviders, probeProvider } from './onboarding.mjs';
+import { addProviders, probeProvider, discoverProbeModel } from './onboarding.mjs';
 import { checkProviders, diagnoseProviders } from './health.mjs';
 import { providerDefinition } from './providers.mjs';
 
@@ -236,9 +236,20 @@ export async function runCli(argv, options = {}) {
       ...current,
       cheapestModel: definition.cheapestModel,
     };
-    const result = await probeProvider(provider, {
+    // A configured model name is a hypothesis. Providers retire free models
+    // constantly — the shipped catalogue named a Llama variant OpenRouter had
+    // already withdrawn, and the probe burned its one request on a 404. Ask the
+    // provider what it actually serves first.
+    //
+    // Never on a dry run: discovery is itself a network request, and --dry-run
+    // promises exactly zero. A "dry" run that quietly calls out would be a lie
+    // in the one place a user checks before spending anything.
+    const isDryRun = parsed.options['dry-run'] === true;
+    const liveModel = isDryRun ? null : await discoverProbeModel(provider, options);
+    const result = await probeProvider(liveModel ? { ...provider, cheapestModel: liveModel } : provider, {
       ...options,
-      dryRun: parsed.options['dry-run'] === true,
+      ...(liveModel ? { model: liveModel } : {}),
+      dryRun: isDryRun,
       observedLimitsPath: options.observedLimitsPath ?? observedLimitsPath(env),
       env,
     });

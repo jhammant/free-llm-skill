@@ -259,6 +259,37 @@ export async function addProviders(options = {}) {
   };
 }
 
+
+// A configured model name is a hypothesis, not a fact. Providers retire free
+// models constantly — the shipped catalogue named a Llama variant that
+// OpenRouter had already withdrawn ("No endpoints found"), which is the same
+// staleness that made the old Cerebras figures wrong. Ask the provider what it
+// actually serves, preferring anything it prices at zero.
+export async function discoverProbeModel(provider, options = {}) {
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  if (typeof fetchFn !== 'function') return null;
+  try {
+    const response = await fetchFn(`${provider.baseUrl}/models`, {
+      headers: provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {},
+      signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
+    });
+    if (!response?.ok) return null;
+    const body = await response.json();
+    const models = Array.isArray(body?.data) ? body.data : [];
+    const isFree = (m) => {
+      const p = m?.pricing?.prompt;
+      return p != null && ['0', '0.0', '0.00'].includes(String(p));
+    };
+    // free first, then anything — a paid-looking model is still a valid probe
+    // target on providers that publish no pricing at all.
+    const free = models.filter(isFree);
+    const pick = (free.length ? free : models).find((m) => typeof m?.id === 'string');
+    return pick?.id ?? null;
+  } catch {
+    return null; // discovery is best-effort; the caller falls back to config
+  }
+}
+
 export function probePlan(provider, options = {}) {
   const configuredRpm = provider.limits?.rpm;
   if (!Number.isSafeInteger(configuredRpm) || configuredRpm <= 0) {
@@ -306,6 +337,7 @@ function probeDelays(configuredRpm, maximumRequests) {
 }
 
 export async function probeProvider(provider, options = {}) {
+
   const plan = probePlan(provider, options);
   if (options.dryRun) return { ...plan, dryRun: true, requests: 0 };
   if (!provider.apiKey) {
