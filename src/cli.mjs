@@ -7,7 +7,7 @@ import { loadConfig } from './config.mjs';
 import { createRedactor } from './redact.mjs';
 import { createScheduler } from './scheduler.mjs';
 import { createProxyServer, listen } from './proxy.mjs';
-import { listModels } from './models.mjs';
+import { listModels, fetchLiveModels } from './models.mjs';
 import {
   configPath,
   logPath,
@@ -20,8 +20,10 @@ import { checkProviders, diagnoseProviders } from './health.mjs';
 import { providerDefinition } from './providers.mjs';
 
 const VERSION = '1.0.0';
-const VALUE_OPTIONS = new Set(['port', 'host', 'limit']);
+const VALUE_OPTIONS = new Set([
+  'provider','port', 'host', 'limit']);
 const BOOLEAN_OPTIONS = new Set([
+  'free-only',
   'all',
   'dry-run',
   'json',
@@ -35,7 +37,7 @@ const HELP = `free-llm ${VERSION}
 Usage:
   free-llm serve [--port 8080] [--host 127.0.0.1] [--json]
   free-llm status [--json]
-  free-llm models [--json]
+  free-llm models [--free-only] [--provider <id>] [--json]
   free-llm log [--limit n] [--json]
   free-llm check [--json]
   free-llm add <provider> [--no-open] [--json]
@@ -400,6 +402,32 @@ export async function runCli(argv, options = {}) {
   }
 
   if (command === 'models') {
+    // Ask each reachable provider what it ACTUALLY serves. The configured list
+    // is a hypothesis: providers retire free models constantly, and a stale
+    // name fails at request time rather than here where it is cheap to see.
+    const only = parsed.options.provider;
+    const usable = configured.config.providers.filter(
+      (pr) => pr.apiKey && (!only || pr.id === only),
+    );
+    const live = (await Promise.all(usable.map((pr) => fetchLiveModels(pr, options)))).filter(Boolean);
+    const rows = live.flatMap(({ provider, models: ms, note }) =>
+      note && ms.length === 0
+        ? [{ id: `(${note})`, provider, free: '', contextLength: '' }]
+        : ms
+            .filter((m) => !parsed.options['free-only'] || m.free)
+            .map((m) => ({ id: m.id, provider, free: m.free ? 'free' : 'paid', contextLength: m.contextLength ?? '' })),
+    );
+    if (rows.length > 0) {
+      if (parsed.options.json) writeJson(stdout, rows);
+      else
+        printRows(stdout, rows, [
+          { label: 'MODEL', value: (r) => r.id },
+          { label: 'PROVIDER', value: (r) => r.provider },
+          { label: 'COST', value: (r) => r.free },
+          { label: 'CONTEXT', value: (r) => r.contextLength },
+        ]);
+      return { exitCode: 0, models: rows };
+    }
     const models = listModels(configured.config);
     if (parsed.options.json) {
       writeJson(stdout, models);

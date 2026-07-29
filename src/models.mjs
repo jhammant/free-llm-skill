@@ -80,3 +80,53 @@ export function listModels(config) {
     .map((model) => ({ ...model, providers: model.providers.sort() }))
     .sort((left, right) => left.id.localeCompare(right.id));
 }
+
+// ── live catalogue ────────────────────────────────────────────────────────────
+//
+// The configured model list is a hypothesis. Providers retire free models
+// constantly — probing OpenRouter with a real key once failed with
+// "404 No endpoints found for meta-llama/llama-3.3-8b-instruct:free" because
+// that model had been withdrawn. So ask each provider what it actually serves.
+
+const AUTO_ROUTER = /(^|\/)(auto|router|fusion|pareto)(-|:|$)/i;
+
+// CRITICAL: pricing.prompt === "0" does NOT mean free.
+// Measured live: openrouter/auto-beta advertises prompt price 0 and a real
+// completion billed 3.913e-06 — it is an auto-router that charges whatever it
+// routes to. Getting this wrong means silently spending money in a tool whose
+// entire purpose is not spending money.
+export function isFreeModel(model) {
+  const id = String(model?.id ?? '');
+  if (/:free$/i.test(id)) return true;
+  if (AUTO_ROUTER.test(id)) return false; // bills downstream regardless of quoted price
+  const p = model?.pricing ?? {};
+  const fields = ['prompt', 'completion', 'request'].map((k) => p[k]).filter((v) => v != null);
+  if (fields.length === 0) return false; // no pricing published — do not assume free
+  return fields.every((v) => Number(v) === 0);
+}
+
+export async function fetchLiveModels(provider, options = {}) {
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  if (typeof fetchFn !== 'function') return { provider: provider.id, models: [], note: 'no fetch' };
+  try {
+    const response = await fetchFn(`${provider.baseUrl}/models`, {
+      headers: provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {},
+      signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
+    });
+    if (!response?.ok) {
+      return { provider: provider.id, models: [], note: `HTTP ${response?.status ?? '?'}` };
+    }
+    const body = await response.json();
+    const raw = Array.isArray(body?.data) ? body.data : [];
+    return {
+      provider: provider.id,
+      models: raw
+        .filter((m) => typeof m?.id === 'string')
+        .map((m) => ({ id: m.id, free: isFreeModel(m), contextLength: m.context_length ?? null })),
+      note: null,
+    };
+  } catch (error) {
+    // Optional enrichment: an unreachable provider is skipped, never fatal.
+    return { provider: provider.id, models: [], note: error?.name ?? 'unreachable' };
+  }
+}
